@@ -84,7 +84,6 @@
 
 ```cpp
 #pragma once
-#include <Arduino.h>
 
 // MAC-адреси ваших плат (замініть на власні реальні дані)
 const uint8_t MAC_MODULE_A[] = {0x4C, 0x75, 0x25, 0xAA, 0xBB, 0x01};
