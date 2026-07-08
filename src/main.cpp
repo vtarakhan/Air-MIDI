@@ -8,7 +8,7 @@
 #endif
 
 #ifndef DEVICE_GET_MAC
-  // Визначаємо адреси та імена
+  // Визначаємо адреси та імена модулів
   #ifdef TARGET_BOARD_A
     #define DEVICE_NAME "Air MIDI Alpha"
     const uint8_t* REMOTE_MAC = MAC_MODULE_B;
@@ -20,9 +20,8 @@
   #endif
 
   bool isBluetoothMode = false;
-  bool lastButtonState = true; 
 
-  // Налаштування BLE MIDI (тільки для Board A)
+  // Налаштування BLE MIDI (компілюється тільки для Board A)
   #ifdef TARGET_BOARD_A
     #include <BLEDevice.h>
     #include <BLEUtils.h>
@@ -34,7 +33,6 @@
     BLEService *pService = nullptr;
     BLECharacteristic *pCharacteristic = nullptr;
     bool deviceConnected = false;
-    bool bleInitialized = false;
 
     class MyServerCallbacks: public BLEServerCallbacks {
         void onConnect(BLEServer* pServer) { deviceConnected = true; };
@@ -46,15 +44,14 @@
         }
     };
 
-    // НОВЕ: Клас-обробник для ПРИЙОМУ MIDI-команд з комп'ютера по Bluetooth
+    // Обробник ПРИЙОМУ MIDI-команд з комп'ютера по Bluetooth (Двосторонній BLE)
     class MyCharacteristicCallbacks: public BLECharacteristicCallbacks {
         void onWrite(BLECharacteristic *pChar) {
             std::string rxValue = pChar->getValue();
             if (rxValue.length() > 2) {
-                // Пакет BLE MIDI містить 2 службові байти (Header та Timestamp) на початку.
-                // Наші реальні MIDI дані починаються з 2-го індексу.
+                // Відкидаємо 2 службові байти BLE MIDI (Header + Timestamp)
                 for (int i = 2; i < rxValue.length(); i++) {
-                    Serial.write(rxValue[i]); // Випльовуємо отримані байти в реальний MIDI OUT
+                    Serial.write(rxValue[i]); // Випльовуємо в реальний MIDI OUT (2N7000)
                 }
             }
         }
@@ -70,16 +67,15 @@ struct __attribute__((packed)) MidiPacket {
 MidiPacket txPacket;
 
 #ifndef DEVICE_GET_MAC
-// Класична сигнатура для сумісності з Arduino Core 2.x (Прийом по ESP-NOW)
+// Класична сигнатура колбеку прийому по ESP-NOW (Двосторонній радіозв'язок)
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     MidiPacket rxPacket;
     memcpy(&rxPacket, incomingData, sizeof(rxPacket));
     for(int i = 0; i < rxPacket.length; i++) {
-        Serial.write(rxPacket.data[i]); 
+        Serial.write(rxPacket.data[i]); // Випльовуємо в реальний MIDI OUT (2N7000)
     }
 }
 
-// Функції старту/стопу режимів
 void startEspNow() {
     WiFi.mode(WIFI_STA);
     if (esp_now_init() == ESP_OK) {
@@ -94,46 +90,27 @@ void startEspNow() {
     }
 }
 
-void stopEspNow() {
-    esp_now_del_peer(REMOTE_MAC); 
-    esp_now_deinit();
-    WiFi.mode(WIFI_OFF);
-}
-
 void startBluetooth() {
     #ifdef TARGET_BOARD_A
-    if (!bleInitialized) {
-        BLEDevice::init(DEVICE_NAME);
-        pServer = BLEDevice::createServer();
-        pServer->setCallbacks(new MyServerCallbacks());
-        pService = pServer->createService(BLEUUID(MIDI_SERVICE_UUID));
-        
-        pCharacteristic = pService->createCharacteristic(
-            BLEUUID(MIDI_CHARACTERISTIC_UUID),
-            BLECharacteristic::PROPERTY_READ   | 
-            BLECharacteristic::PROPERTY_NOTIFY | 
-            BLECharacteristic::PROPERTY_WRITE  | 
-            BLECharacteristic::PROPERTY_WRITE_NR
-        );
-        
-        pCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
-        
-        // НОВЕ: Підключаємо обробник прийому даних
-        pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-        
-        pService->start();
-        bleInitialized = true;
-    }
+    BLEDevice::init(DEVICE_NAME);
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+    pService = pServer->createService(BLEUUID(MIDI_SERVICE_UUID));
+    
+    pCharacteristic = pService->createCharacteristic(
+        BLEUUID(MIDI_CHARACTERISTIC_UUID),
+        BLECharacteristic::PROPERTY_READ   | 
+        BLECharacteristic::PROPERTY_NOTIFY | 
+        BLECharacteristic::PROPERTY_WRITE  | 
+        BLECharacteristic::PROPERTY_WRITE_NR
+    );
+    
+    pCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+    pCharacteristic->setCallbacks(new MyCharacteristicCallbacks()); // Вмикаємо прийом по BLE
+    
+    pService->start();
     BLEDevice::getAdvertising()->addServiceUUID(MIDI_SERVICE_UUID);
     BLEDevice::startAdvertising();
-    #endif
-}
-
-void stopBluetooth() {
-    #ifdef TARGET_BOARD_A
-    if (bleInitialized) {
-        BLEDevice::getAdvertising()->stop();
-    }
     #endif
 }
 
@@ -160,13 +137,16 @@ void setup() {
 #else
     Serial.begin(31250); // Швидкість MIDI
 
+    // Опитування тумблера ТІЛЬКИ ПІД ЧАС ЗАПУСКУ
     #ifdef HAS_MODE_SWITCH
         pinMode(MODE_SWITCH_PIN, INPUT_PULLUP);
-        delay(50);
-        lastButtonState = digitalRead(MODE_SWITCH_PIN);
-        isBluetoothMode = (lastButtonState == LOW);
+        delay(50); // Антибрязк контактів при увімкненні
+        if (digitalRead(MODE_SWITCH_PIN) == LOW) {
+            isBluetoothMode = true;
+        }
     #endif
 
+    // Ініціалізація вибраного інтерфейсу один раз на старті
     if (isBluetoothMode) {
         startBluetooth();
     } else {
@@ -177,28 +157,7 @@ void setup() {
 
 void loop() {
 #ifndef DEVICE_GET_MAC
-    // 1. Динамічна перевірка тумблера «на льоту»
-    #ifdef HAS_MODE_SWITCH
-        bool currentButtonState = digitalRead(MODE_SWITCH_PIN);
-        if (currentButtonState != lastButtonState) {
-            delay(50); // Антибрязк
-            if (digitalRead(MODE_SWITCH_PIN) == currentButtonState) {
-                lastButtonState = currentButtonState;
-                
-                if (currentButtonState == LOW) {
-                    stopEspNow();
-                    isBluetoothMode = true;
-                    startBluetooth();
-                } else {
-                    stopBluetooth();
-                    isBluetoothMode = false;
-                    startEspNow();
-                }
-            }
-        }
-    #endif
 
-    // 2. Читання та відправка MIDI повідомлень з фізичного MIDI IN
     if (Serial.available() > 0) {
         txPacket.length = 0;
         
