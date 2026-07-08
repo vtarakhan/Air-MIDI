@@ -40,6 +40,12 @@
   bool isBluetoothMode = false;
 #endif
 
+// Структура MIDI пакету для ESP-NOW (Перенесено нагору)
+typedef struct __attribute__((packed)) {
+    uint8_t data[3];
+    uint8_t length;
+} midi_packet_t;
+
 // UUID для BLE MIDI згідно з специфікацією MMA
 static const ble_uuid128_t midi_svc_uuid =
     BLE_UUID128_INIT(0x00, 0xc7, 0xc4, 0x4e, 0xe3, 0x6c, 0x51, 0xa7, 0x33, 0x4b, 0xe8, 0xed, 0x5a, 0x0e, 0xb8, 0x03);
@@ -51,22 +57,20 @@ uint16_t midi_chr_val_handle;
 uint16_t conn_handle;
 bool ble_connected = false;
 
-// Структура MIDI пакету для ESP-NOW
-typedef struct __attribute__((packed)) {
-    uint8_t data[3];
-    uint8_t length;
-} midi_packet_t;
+// Прототип функції подій GAP
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
 
-// --- Ініціалізація UART драйвера ---
+// --- ВІДНОВЛЕНО: Ініціалізація UART драйвера із зануленням полів ---
 void init_midi_uart() {
-    const uart_config_t uart_config = {
-        .baud_rate = 31250,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
+    uart_config_t uart_config = {}; // Повне занулення структури для суворих С++ білдерів
+    
+    uart_config.baud_rate = 31250,   // Швидкість MIDI
+    uart_config.data_bits = UART_DATA_8_BITS;
+    uart_config.parity = UART_PARITY_DISABLE;
+    uart_config.stop_bits = UART_STOP_BITS_1;
+    uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_config.source_clk = UART_SCLK_DEFAULT;
+
     uart_driver_install(MIDI_UART_NUM, UART_BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(MIDI_UART_NUM, &uart_config);
     uart_set_pin(MIDI_UART_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
@@ -117,20 +121,33 @@ static int midi_chr_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+// ВИПРАВЛЕНО: Використовуємо С++ стайл ініціалізації для обходу суворого варнінга компілятора
+static struct ble_gatt_chr_def midi_chars[] = {
+    {
+        .uuid = &midi_chr_uuid.u,
+        .access_cb = midi_chr_cb,
+        .arg = NULL,
+        .descriptors = NULL,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+        .min_key_size = 0,
+        .val_handle = &midi_chr_val_handle,
+        .cpfd = NULL,
+    },
+    {
+        // Повністю порожній елемент-термінатор списку характеристик
+    }
+};
+
 static const struct ble_gatt_svc_def midi_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &midi_svc_uuid.u,
-        .characteristics = (struct ble_gatt_chr_def[]) { {
-            .uuid = &midi_chr_uuid.u,
-            .access_cb = midi_chr_cb,
-            .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
-            .val_handle = &midi_chr_val_handle,
-        }, {
-            0,
-        } },
+        .includes = NULL,
+        .characteristics = midi_chars, // Передаємо окремо створений масив характеристик
     },
-    { 0 },
+    {
+        // Повністю порожній елемент-термінатор списку сервісів
+    },
 };
 
 static void ble_app_advertise(void) {
@@ -143,12 +160,13 @@ static void ble_app_advertise(void) {
     fields.name_len = strlen((char*)fields.name);
     fields.name_is_complete = 1;
 
-    if (ble_gap_set_advertising_data(&fields) != 0) return;
+    if (ble_gap_adv_set_fields(&fields) != 0) return;
 
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, NULL, NULL);
+    
+    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, ble_gap_event, NULL);
 }
 
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
@@ -192,10 +210,11 @@ void send_midi_ble(uint8_t* data, uint8_t length) {
     
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, length);
     if (om) {
-        uint8_t header[2] = {0x80, 0x80}; // Базові лічильники Timestamp
+        uint8_t header[2] = {0x80, 0x80}; 
         os_mbuf_prepend(om, 2);
         os_mbuf_copyinto(om, 0, header, 2);
-        ble_gatt_notif_custom(conn_handle, midi_chr_val_handle, om);
+        
+        ble_gatts_notify_custom(conn_handle, midi_chr_val_handle, om);
     }
 }
 #endif
