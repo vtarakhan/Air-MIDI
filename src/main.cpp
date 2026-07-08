@@ -20,7 +20,7 @@
   #endif
 
   bool isBluetoothMode = false;
-  bool lastButtonState = true; // Для відстеження зміни положення тумблера
+  bool lastButtonState = true; 
 
   // Налаштування BLE MIDI (тільки для Board A)
   #ifdef TARGET_BOARD_A
@@ -56,8 +56,8 @@ struct __attribute__((packed)) MidiPacket {
 MidiPacket txPacket;
 
 #ifndef DEVICE_GET_MAC
-// Колбек прийому по ESP-NOW
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
+// ВИПРАВЛЕНО: Класична сигнатура для сумісності з Arduino Core 2.x
+void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     MidiPacket rxPacket;
     memcpy(&rxPacket, incomingData, sizeof(rxPacket));
     for(int i = 0; i < rxPacket.length; i++) {
@@ -69,9 +69,11 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
 void startEspNow() {
     WiFi.mode(WIFI_STA);
     if (esp_now_init() == ESP_OK) {
+        // ВИПРАВЛЕНО: Явне приведення типів під старе ядро
         esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
         
         esp_now_peer_info_t peerInfo;
+        memset(&peerInfo, 0, sizeof(peerInfo)); 
         memcpy(peerInfo.peer_addr, REMOTE_MAC, 6);
         peerInfo.channel = 1;  
         peerInfo.encrypt = false;
@@ -80,6 +82,7 @@ void startEspNow() {
 }
 
 void stopEspNow() {
+    esp_now_del_peer(REMOTE_MAC); 
     esp_now_deinit();
     WiFi.mode(WIFI_OFF);
 }
@@ -108,8 +111,6 @@ void stopBluetooth() {
     #ifdef TARGET_BOARD_A
     if (bleInitialized) {
         BLEDevice::getAdvertising()->stop();
-        // Повністю гасити BLE стек "на льоту" через deinit(true) може призводити до паніки ядра на деяких версіях SDK, 
-        // тому ми просто зупиняємо Advertising та відключаємо клієнтів. Це безпечно і швидко.
     }
     #endif
 }
@@ -144,7 +145,6 @@ void setup() {
         isBluetoothMode = (lastButtonState == LOW);
     #endif
 
-    // Початковий запуск залежно від тумблера
     if (isBluetoothMode) {
         startBluetooth();
     } else {
@@ -155,21 +155,19 @@ void setup() {
 
 void loop() {
 #ifndef DEVICE_GET_MAC
-    // 1. Динамічна перевірка тумблера «на льоту» (Тільки на Board A)
+    // 1. Динамічна перевірка тумблера «на льоту»
     #ifdef HAS_MODE_SWITCH
         bool currentButtonState = digitalRead(MODE_SWITCH_PIN);
         if (currentButtonState != lastButtonState) {
-            delay(50); // Простий антибрязк
+            delay(50); // Антибрязк
             if (digitalRead(MODE_SWITCH_PIN) == currentButtonState) {
                 lastButtonState = currentButtonState;
                 
                 if (currentButtonState == LOW) {
-                    // Перемикаємо на Bluetooth
                     stopEspNow();
                     isBluetoothMode = true;
                     startBluetooth();
                 } else {
-                    // Перемикаємо на ESP-NOW
                     stopBluetooth();
                     isBluetoothMode = false;
                     startEspNow();
@@ -178,7 +176,7 @@ void loop() {
         }
     #endif
 
-    // 2. Читання та відправка MIDI повідомлень
+    // 2. Читання та відправка MIDI повідомлень (Duplex)
     if (Serial.available() > 0) {
         txPacket.length = 0;
         
