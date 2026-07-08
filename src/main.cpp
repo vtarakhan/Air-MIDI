@@ -45,10 +45,24 @@
             }
         }
     };
+
+    // НОВЕ: Клас-обробник для ПРИЙОМУ MIDI-команд з комп'ютера по Bluetooth
+    class MyCharacteristicCallbacks: public BLECharacteristicCallbacks {
+        void onWrite(BLECharacteristic *pChar) {
+            std::string rxValue = pChar->getValue();
+            if (rxValue.length() > 2) {
+                // Пакет BLE MIDI містить 2 службові байти (Header та Timestamp) на початку.
+                // Наші реальні MIDI дані починаються з 2-го індексу.
+                for (int i = 2; i < rxValue.length(); i++) {
+                    Serial.write(rxValue[i]); // Випльовуємо отримані байти в реальний MIDI OUT
+                }
+            }
+        }
+    };
   #endif
 #endif
 
-// Структура MIDI пакету
+// Структура MIDI пакету для ESP-NOW
 struct __attribute__((packed)) MidiPacket {
     uint8_t data[3];
     uint8_t length;
@@ -56,12 +70,12 @@ struct __attribute__((packed)) MidiPacket {
 MidiPacket txPacket;
 
 #ifndef DEVICE_GET_MAC
-// ВИПРАВЛЕНО: Класична сигнатура для сумісності з Arduino Core 2.x
+// Класична сигнатура для сумісності з Arduino Core 2.x (Прийом по ESP-NOW)
 void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
     MidiPacket rxPacket;
     memcpy(&rxPacket, incomingData, sizeof(rxPacket));
     for(int i = 0; i < rxPacket.length; i++) {
-        Serial.write(rxPacket.data[i]); // Вивід у MIDI OUT через 2N7000
+        Serial.write(rxPacket.data[i]); 
     }
 }
 
@@ -69,7 +83,6 @@ void OnDataRecv(const uint8_t *mac_addr, const uint8_t *incomingData, int len) {
 void startEspNow() {
     WiFi.mode(WIFI_STA);
     if (esp_now_init() == ESP_OK) {
-        // ВИПРАВЛЕНО: Явне приведення типів під старе ядро
         esp_now_register_recv_cb(esp_now_recv_cb_t(OnDataRecv));
         
         esp_now_peer_info_t peerInfo;
@@ -94,11 +107,20 @@ void startBluetooth() {
         pServer = BLEDevice::createServer();
         pServer->setCallbacks(new MyServerCallbacks());
         pService = pServer->createService(BLEUUID(MIDI_SERVICE_UUID));
+        
         pCharacteristic = pService->createCharacteristic(
             BLEUUID(MIDI_CHARACTERISTIC_UUID),
-            BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
+            BLECharacteristic::PROPERTY_READ   | 
+            BLECharacteristic::PROPERTY_NOTIFY | 
+            BLECharacteristic::PROPERTY_WRITE  | 
+            BLECharacteristic::PROPERTY_WRITE_NR
         );
+        
         pCharacteristic->setAccessPermissions(ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE);
+        
+        // НОВЕ: Підключаємо обробник прийому даних
+        pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
+        
         pService->start();
         bleInitialized = true;
     }
@@ -176,7 +198,7 @@ void loop() {
         }
     #endif
 
-    // 2. Читання та відправка MIDI повідомлень (Duplex)
+    // 2. Читання та відправка MIDI повідомлень з фізичного MIDI IN
     if (Serial.available() > 0) {
         txPacket.length = 0;
         
