@@ -9,8 +9,6 @@
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "mac_address.h"
-
-// Заголовки NimBLE
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
