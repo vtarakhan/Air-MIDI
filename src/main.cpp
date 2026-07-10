@@ -8,7 +8,10 @@
 #include "esp_now.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_event.h"  // Додано для стабільного запуску event loop
 #include "mac_address.h"
+
+// Заголовки NimBLE
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -38,7 +41,7 @@
   bool isBluetoothMode = false;
 #endif
 
-// Структура MIDI пакету для ESP-NOW (Перенесено нагору)
+// Структура MIDI пакету для ESP-NOW
 typedef struct __attribute__((packed)) {
     uint8_t data[3];
     uint8_t length;
@@ -58,11 +61,11 @@ bool ble_connected = false;
 // Прототип функції подій GAP
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 
-// --- ВІДНОВЛЕНО: Ініціалізація UART драйвера із зануленням полів ---
+// --- Ініціалізація UART драйвера із зануленням полів ---
 void init_midi_uart() {
     uart_config_t uart_config = {}; // Повне занулення структури для суворих С++ білдерів
     
-    uart_config.baud_rate = 31250,   // Швидкість MIDI
+    uart_config.baud_rate = 31250;   // Швидкість MIDI
     uart_config.data_bits = UART_DATA_8_BITS;
     uart_config.parity = UART_PARITY_DISABLE;
     uart_config.stop_bits = UART_STOP_BITS_1;
@@ -86,6 +89,7 @@ void wifi_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t *data,
 
 void start_esp_now() {
     ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
@@ -119,7 +123,6 @@ static int midi_chr_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble_ga
     return BLE_ATT_ERR_UNLIKELY;
 }
 
-// ВИПРАВЛЕНО: Використовуємо С++ стайл ініціалізації для обходу суворого варнінга компілятора
 static struct ble_gatt_chr_def midi_chars[] = {
     {
         .uuid = &midi_chr_uuid.u,
@@ -141,7 +144,7 @@ static const struct ble_gatt_svc_def midi_svcs[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &midi_svc_uuid.u,
         .includes = NULL,
-        .characteristics = midi_chars, // Передаємо окремо створений масив характеристик
+        .characteristics = midi_chars,
     },
     {
         // Повністю порожній елемент-термінатор списку сервісів
@@ -215,7 +218,7 @@ void send_midi_ble(uint8_t* data, uint8_t length) {
         ble_gatts_notify_custom(conn_handle, midi_chr_val_handle, om);
     }
 }
-#endif
+#endif // TARGET_BOARD_A
 
 // --- Потік (Task) обробки фізичного входу MIDI IN ---
 void midi_gate_task(void *pvParameters) {
@@ -252,10 +255,13 @@ void midi_gate_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
-#endif
+#endif // DEVICE_GET_MAC
 
 // --- Головна точка входу ESP-IDF ---
 extern "C" void app_main(void) {
+    // Даємо 2 секунди ПК на ініціалізацію віртуального COM-порту через USB
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -264,25 +270,34 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ret);
 
 #ifdef DEVICE_GET_MAC
+    // Полноцінний, залізобетонний запуск Wi-Fi підсистем для зчитування EFUSE MAC
     ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
     uint8_t mac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, mac);
-    printf("\n==========================================\n");
-    printf(" MAC-АДРЕСА ЦІЄЇ ПЛАТИ: %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    printf("==========================================\n\n");
+    esp_err_t err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    if (err == ESP_OK) {
+        printf("\n==========================================\n");
+        printf(" 🎯 MAC-АДРЕСА ЦІЄЇ ПЛАТИ: %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        printf("==========================================\n\n");
+    } else {
+        printf("\n❌ Помилка читання MAC-адреси!\n\n");
+    }
+    esp_wifi_stop();
 #else
     init_midi_uart();
 
     #ifdef HAS_MODE_SWITCH
-        gpio_config_t io_conf = {
-            .pin_bit_mask = (1ULL << MODE_SWITCH_PIN),
-            .mode = GPIO_MODE_INPUT,
-            .pull_up_en = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE
-        };
+        gpio_config_t io_conf = {}; // Повне занулення
+        io_conf.pin_bit_mask = (1ULL << MODE_SWITCH_PIN);
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+        io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_conf.intr_type = GPIO_INTR_DISABLE;
         gpio_config(&io_conf);
         vTaskDelay(pdMS_TO_TICKS(50));
 
